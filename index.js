@@ -1,51 +1,113 @@
-require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
-const Groq = require('groq-sdk');
+require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json());
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const TOKEN = process.env.WHATSAPP_TOKEN; // Meta se milega
-const PHONE_ID = process.env.PHONE_NUMBER_ID;
+// --- CONFIG ---
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "gharana123";
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const PORT = process.env.PORT || 3000;
 
-let appointments = [];
-
-// Jab patient message karega
-app.post('/webhook', async (req, res) => {
-  const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-  if (!msg) return res.sendStatus(200);
-
-  const from = msg.from;
-  const text = msg.text?.body || "";
-
-  // AI se jawab lo
-  const aiReply = await groq.chat.completions.create({
-    messages: [
-      { role: "system", content: `You are AI receptionist for Al-Shifa Clinic. You do appointment booking. Ask Name, Doctor, Date, Time step by step in Roman Urdu. Doctors: Dr Ahmed (General), Dr Fatima (Skin). If user says BOOK, start booking.` },
-      { role: "user", content: text }
-    ],
-    model: "llama-3.3-70b-versatile"
-  });
-
-  const replyText = aiReply.choices[0].message.content;
-
-  // Wapas WhatsApp par bhejo - Official API se
-  await axios.post(`https://graph.facebook.com/v20.0/${PHONE_ID}/messages`, {
-    messaging_product: "whatsapp",
-    to: from,
-    text: { body: replyText }
-  }, { headers: { Authorization: `Bearer ${TOKEN}` } });
-
-  res.sendStatus(200);
-});
-
-// Meta verification ke liye
+// --- WEBHOOK VERIFICATION (For Meta) ---
 app.get('/webhook', (req, res) => {
-  if (req.query['hub.verify_token'] === 'clinic123') res.send(req.query['hub.challenge']);
-  else res.sendStatus(403);
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode && token) {
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+      console.log('WEBHOOK VERIFIED!');
+      res.status(200).send(challenge);
+    } else {
+      res.sendStatus(403);
+    }
+  } else {
+    res.sendStatus(400);
+  }
 });
 
-app.listen(3000, () => console.log('Official Bot Running on Port 3000'));
+// --- RECEIVE MESSAGE ---
+app.post('/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+    
+    if (body.object && body.entry && body.entry[0].changes[0].value.messages) {
+      const messageData = body.entry[0].changes[0].value.messages[0];
+      const from = messageData.from;
+      const msgBody = messageData.text ? messageData.text.body : "";
+      
+      console.log(`Message from ${from}: ${msgBody}`);
+
+      // AI Reply from Groq
+      const aiReply = await getAIReply(msgBody);
+
+      // Send back to WhatsApp
+      await sendWhatsAppMessage(from, aiReply);
+    }
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Webhook Error:', error.message);
+    res.sendStatus(500);
+  }
+});
+
+// --- GROQ AI FUNCTION ---
+async function getAIReply(userMessage) {
+  try {
+    const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+      model: "llama-3.1-8b-instant",
+      messages: [
+        {
+          role: "system",
+          content: "You are Dr. Gharana Clinic's professional assistant. You speak in polite Urdu mixed English. Your job is to book appointments. Ask for Name, Age, Problem, Date. If user says BOOK, start booking. Be friendly and short."
+        },
+        {
+          role: "user",
+          content: userMessage
+        }
+      ],
+      temperature: 0.7
+    }, {
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    return response.data.choices[0].message.content;
+  } catch (error) {
+    console.error('Groq Error:', error.response ? error.response.data : error.message);
+    return "Salam! Main Dr. Clinic ka assistant hun. Appointment ke liye BOOK likhein.";
+  }
+}
+
+// --- SEND WHATSAPP FUNCTION ---
+async function sendWhatsAppMessage(to, text) {
+  try {
+    await axios.post(`https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`, {
+      messaging_product: "whatsapp",
+      to: to,
+      text: { body: text }
+    }, {
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log(`Reply sent to ${to}`);
+  } catch (error) {
+    console.error('Send Message Error:', error.response ? error.response.data : error.message);
+  }
+}
+
+app.get('/', (req, res) => {
+  res.send('Clinic Booking Bot is Running!');
+});
+
+app.listen(PORT, () => {
+  console.log(`Official Bot Running on Port ${PORT}`);
+});
